@@ -1,0 +1,5 @@
+dhanhq
+pandas
+numpy
+requests
+schedule
