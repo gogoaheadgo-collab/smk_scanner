@@ -1,0 +1,29 @@
+name: SMK Swing Trade Scanner
+
+on:
+  schedule:
+    - cron: '55 3 * * 1-5'  # 9:25 AM IST = 3:55 AM UTC, weekdays only
+  workflow_dispatch:          # Allows manual run from GitHub anytime
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run scanner
+        env:
+          EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECEIVER: ${{ secrets.EMAIL_RECEIVER }}
+        run: python main.py --now
