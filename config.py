@@ -8,10 +8,10 @@ DHAN_CLIENT_ID = "YOUR_CLIENT_ID"
 DHAN_ACCESS_TOKEN = "YOUR_ACCESS_TOKEN"
 
 # --- Email Settings ---
-EMAIL_SENDER = "gogoaheadgo@gmail.com"
-EMAIL_PASSWORD = "lfpanywavsmtiggr"       # Gmail App Password (not your login password)
-EMAIL_RECEIVER = "gogoaheadgo@gmail.com"    # Where alerts go
-SMTP_SERVER = "smtp.gmail.com"
+import os
+EMAIL_SENDER   = os.environ.get("EMAIL_SENDER",   "gogoaheadgo@gmail.com")
+EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD",  "lfpanywavsmtiggr")
+EMAIL_RECEIVER = os.environ.get("EMAIL_RECEIVER",  "gogoaheadgo@gmail.com")SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 587
 
 # --- Scanner Parameters ---
