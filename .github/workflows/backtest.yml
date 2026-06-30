@@ -1,0 +1,38 @@
+name: SMK Scanner Backtest
+
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: 'Number of trading days to backtest'
+        required: false
+        default: '10'
+      max_stocks:
+        description: 'Limit stocks for faster test (blank = all)'
+        required: false
+        default: ''
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run backtest
+        run: python backtest.py ${{ github.event.inputs.days }} ${{ github.event.inputs.max_stocks }}
+
+      - name: Upload results CSV
+        uses: actions/upload-artifact@v4
+        with:
+          name: backtest-results
+          path: backtest_results.csv
+          if-no-files-found: warn
