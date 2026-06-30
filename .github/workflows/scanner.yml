@@ -3,7 +3,7 @@ name: SMK Swing Trade Scanner
 on:
   schedule:
     - cron: '55 3 * * 1-5'  # 9:25 AM IST = 3:55 AM UTC, weekdays only
-  workflow_dispatch:          # Allows manual run from GitHub anytime
+  workflow_dispatch:
 
 jobs:
   scan:
