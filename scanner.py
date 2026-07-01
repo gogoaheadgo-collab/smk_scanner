@@ -10,6 +10,46 @@ import requests
 from datetime import datetime, timedelta
 import config
 
+# Diagnostic counters — reset per scan run, reported at end of main.py
+NSE_STATS = {
+    'attempts': 0,
+    'success': 0,
+    'session_warmup_failed': 0,
+    'quote_fetch_failed': 0,
+    'json_parse_failed': 0,
+    'no_open_price': 0,
+    'no_volume_data': 0,
+    'last_error_sample': None,
+}
+
+_nse_session = None
+
+
+def get_nse_session():
+    """Reuse a single NSE session across all stock checks in a run.
+    Creating a fresh session per stock (old behavior) increases the
+    chance of NSE rate-limiting / blocking the scanner."""
+    global _nse_session
+    if _nse_session is None:
+        _nse_session = requests.Session()
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+        }
+        try:
+            _nse_session.get("https://www.nseindia.com", headers=headers, timeout=10)
+        except Exception as e:
+            NSE_STATS['session_warmup_failed'] += 1
+            NSE_STATS['last_error_sample'] = f"session_warmup: {type(e).__name__}: {e}"
+    return _nse_session
+
+
+def reset_nse_session():
+    """Force a fresh session (e.g. if we suspect we got blocked)."""
+    global _nse_session
+    _nse_session = None
+
 
 def get_daily_candles(symbol, days=300):
     """
@@ -44,32 +84,96 @@ def get_today_open_and_first10min_volume(symbol):
     Fetch today's live open price + approximate first-10-min volume
     using NSE's public quote API.
     Returns: (today_open, first10_vol_estimate) or (None, None)
+    Tracks detailed failure reasons in NSE_STATS for diagnostics.
     """
+    NSE_STATS['attempts'] += 1
+
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'application/json',
-        'Referer': 'https://www.nseindia.com/get-quotes/equity',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Referer': f'https://www.nseindia.com/get-quotes/equity?symbol={symbol}',
     }
+
+    session = get_nse_session()
+    if session is None:
+        return None, None
+
     try:
-        session = requests.Session()
-        session.get("https://www.nseindia.com", headers=headers, timeout=10)
         url = f"https://www.nseindia.com/api/quote-equity?symbol={symbol}"
         resp = session.get(url, headers=headers, timeout=10)
-        data = resp.json()
+
+        if resp.status_code != 200:
+            NSE_STATS['quote_fetch_failed'] += 1
+            NSE_STATS['last_error_sample'] = f"{symbol}: HTTP {resp.status_code}"
+            # If we're being blocked (403/429), refresh session for next call
+            if resp.status_code in (403, 429):
+                reset_nse_session()
+            return None, None
+
+        try:
+            data = resp.json()
+        except Exception as e:
+            NSE_STATS['json_parse_failed'] += 1
+            NSE_STATS['last_error_sample'] = f"{symbol}: JSON parse failed: {type(e).__name__}"
+            return None, None
 
         today_open = data.get('priceInfo', {}).get('open', None)
+        if today_open is None:
+            NSE_STATS['no_open_price'] += 1
+            NSE_STATS['last_error_sample'] = f"{symbol}: no open price in response (keys: {list(data.keys())[:5]})"
+            return None, None
 
-        # NSE quote API gives full day's running volume, not first-10-min specifically.
-        # We approximate: at 9:25 AM, ~10 min of trading has occurred.
-        # totalTradedVolume reflects volume traded so far in the session.
-        total_vol_so_far = data.get('preOpenMarket', {}).get('totalTradedVolume', None)
-        if total_vol_so_far is None:
+        total_vol_so_far = None
+        try:
             total_vol_so_far = data.get('marketDeptOrderBook', {}).get('tradeInfo', {}).get('totalTradedVolume', None)
+            if total_vol_so_far is None:
+                total_vol_so_far = data.get('preOpenMarket', {}).get('totalTradedVolume', None)
+        except Exception:
+            pass
 
+        if total_vol_so_far is None:
+            NSE_STATS['no_volume_data'] += 1
+            NSE_STATS['last_error_sample'] = f"{symbol}: open found ({today_open}) but no volume data"
+            return today_open, None
+
+        NSE_STATS['success'] += 1
         return today_open, total_vol_so_far
 
-    except Exception:
+    except requests.exceptions.RequestException as e:
+        NSE_STATS['quote_fetch_failed'] += 1
+        NSE_STATS['last_error_sample'] = f"{symbol}: {type(e).__name__}: {e}"
         return None, None
+    except Exception as e:
+        NSE_STATS['quote_fetch_failed'] += 1
+        NSE_STATS['last_error_sample'] = f"{symbol}: unexpected {type(e).__name__}: {e}"
+        return None, None
+
+
+def print_nse_diagnostics():
+    """Print a summary of NSE live-quote call success/failure to the run log."""
+    s = NSE_STATS
+    print(f"\n{'='*60}")
+    print(f"NSE LIVE QUOTE DIAGNOSTICS (Condition 3 & 4 data source)")
+    print(f"{'='*60}")
+    print(f"  Total attempts:          {s['attempts']}")
+    print(f"  Successful (open+vol):   {s['success']}")
+    print(f"  Session warmup failed:   {s['session_warmup_failed']}")
+    print(f"  Quote fetch failed:      {s['quote_fetch_failed']}  (network/HTTP errors, incl. 403/429 blocks)")
+    print(f"  JSON parse failed:       {s['json_parse_failed']}  (NSE returned non-JSON, likely a block page)")
+    print(f"  No open price in resp:   {s['no_open_price']}")
+    print(f"  No volume data:          {s['no_volume_data']}")
+    if s['attempts'] > 0:
+        success_rate = (s['success'] / s['attempts']) * 100
+        print(f"  Success rate:            {success_rate:.1f}%")
+        if success_rate < 50:
+            print(f"\n  WARNING: Success rate below 50%. NSE is likely blocking or rate-limiting")
+            print(f"  this scanner's IP (common for GitHub Actions shared IPs). If this persists,")
+            print(f"  Conditions 3 & 4 cannot work reliably from GitHub Actions and we'd need an")
+            print(f"  alternative live-quote source.")
+    if s['last_error_sample']:
+        print(f"\n  Last error sample: {s['last_error_sample']}")
+    print(f"{'='*60}\n")
 
 
 def check_condition1_momentum_consolidation(df):
@@ -177,12 +281,38 @@ def compute_stop_loss(df, alert_price):
         return sl_from_pct, f"3% ({config.SL_PCT}% below ₹{alert_price} = ₹{sl_from_pct})"
 
 
+# Funnel diagnostics — how many stocks pass each condition
+FUNNEL_STATS = {
+    'total_scanned': 0,
+    'passed_c1_momentum': 0,
+    'passed_c2_ma': 0,
+    'passed_c3_gap': 0,
+    'passed_c4_volume': 0,
+    'fully_qualified': 0,
+}
+
+
+def print_funnel_diagnostics():
+    f = FUNNEL_STATS
+    print(f"\n{'='*60}")
+    print(f"CONDITION FUNNEL DIAGNOSTICS")
+    print(f"{'='*60}")
+    print(f"  Total stocks scanned:        {f['total_scanned']}")
+    print(f"  Passed C1 (momentum/consol): {f['passed_c1_momentum']}")
+    print(f"  Passed C2 (above 14MA):      {f['passed_c2_ma']}")
+    print(f"  Passed C3 (gap up):          {f['passed_c3_gap']}")
+    print(f"  Passed C4 (relative volume): {f['passed_c4_volume']}")
+    print(f"  Fully qualified:             {f['fully_qualified']}")
+    print(f"{'='*60}\n")
+
+
 def scan_stock(stock):
     """
     Run all conditions on a single stock using Yahoo Finance + NSE live quote.
     Returns result dict if all pass, else None.
     """
     symbol = stock['symbol']
+    FUNNEL_STATS['total_scanned'] += 1
 
     df = get_daily_candles(symbol, days=300)
     if df is None or len(df) < 100:
@@ -192,11 +322,13 @@ def scan_stock(stock):
     c1, swing_high, consol_low = check_condition1_momentum_consolidation(df)
     if not c1:
         return None
+    FUNNEL_STATS['passed_c1_momentum'] += 1
 
     # Condition 2 — above 14MA (historical, Yahoo data)
     c2, ma14 = check_condition2_above_ma(df)
     if not c2:
         return None
+    FUNNEL_STATS['passed_c2_ma'] += 1
 
     # Fetch TODAY's live open + volume from NSE (only for stocks that passed C1+C2 — saves API calls)
     today_open, first10_vol = get_today_open_and_first10min_volume(symbol)
@@ -205,14 +337,18 @@ def scan_stock(stock):
     c3, gap_pct = check_condition3_gap_up(df, today_open)
     if not c3:
         return None
+    FUNNEL_STATS['passed_c3_gap'] += 1
 
     # Condition 4 — relative volume (live data)
     c4, rvol_pct = check_condition4_relative_volume(df, first10_vol)
     if not c4:
         return None
+    FUNNEL_STATS['passed_c4_volume'] += 1
 
     alert_price = round(today_open, 2)
     sl_price, sl_label = compute_stop_loss(df, alert_price)
+
+    FUNNEL_STATS['fully_qualified'] += 1
 
     return {
         'symbol': symbol,
