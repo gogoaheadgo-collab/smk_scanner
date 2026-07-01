@@ -9,7 +9,7 @@ from datetime import datetime
 
 import config
 from universe import build_universe
-from scanner import scan_stock
+from scanner import scan_stock, print_nse_diagnostics, print_funnel_diagnostics, NSE_STATS, FUNNEL_STATS
 from alerts import send_alert_email, send_no_signal_email
 
 alerted_today = {}
@@ -45,6 +45,12 @@ def run_scan():
     if alerted_today.get('date') != today_str:
         alerted_today = {'date': today_str, 'symbols': set()}
 
+    # Reset diagnostic counters for this run
+    for k in NSE_STATS:
+        NSE_STATS[k] = 0 if k != 'last_error_sample' else None
+    for k in FUNNEL_STATS:
+        FUNNEL_STATS[k] = 0
+
     refresh_universe_if_needed()
 
     if not cached_universe:
@@ -69,6 +75,9 @@ def run_scan():
             print(f"  QUALIFIED: {symbol} | Alert Rs.{result['alert_price']} | SL Rs.{result['stop_loss']}")
 
     print(f"\nScan complete. {len(qualified)} stock(s) qualified.")
+
+    print_funnel_diagnostics()
+    print_nse_diagnostics()
 
     if qualified:
         send_alert_email(qualified)
